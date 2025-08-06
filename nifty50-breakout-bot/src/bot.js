@@ -1,7 +1,7 @@
 // src/bot.js
 const Api = require('../lib/RestApi');
 const credentials = require('../credentials');
-const { sleep, hhmmss, timeIsAfter } = require('./utils');
+const { sleep, hhmmss, timeIsAfter, getCurrentTime } = require('./utils');  // SINGLE IMPORT LINE
 const fs = require('fs');
 
 const CONFIG = {
@@ -104,7 +104,6 @@ class BreakoutBot {
         }
     }
 
-
     async initWebsocket() {
         try {
             console.log('🔌 Initializing WebSocket connection...');
@@ -163,7 +162,6 @@ class BreakoutBot {
         }
     }
 
-
     onTick(tick) {
         try {
             const sym = this.tokenToSymbol(tick.tk);
@@ -183,21 +181,48 @@ class BreakoutBot {
                 candle.c = price;
             }
 
+            // FIXED: First candle qualification logic
             if (!this.firstCandle[sym] && hhmmss() >= CONFIG.FIRST_CANDLE_END) {
-                const first5 = arr.filter(c => c.ts < (ts + 1) && c.ts >= ts - 4 * 60000);
+                // Calculate the exact timestamps for 9:15-9:20 AM today
+                const today = new Date();
+                const marketOpen = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 9, 15, 0);
+                const firstCandleEnd = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 9, 20, 0);
+
+                const marketOpenTs = Math.floor(marketOpen.getTime() / 60000) * 60000;
+                const firstCandleEndTs = Math.floor(firstCandleEnd.getTime() / 60000) * 60000;
+
+                // Find candles specifically from 9:15-9:19 (5 one-minute candles)
+                const first5 = arr.filter(c => c.ts >= marketOpenTs && c.ts < firstCandleEndTs);
+
+                // Debug logging (remove after testing)
+                if (first5.length > 0) {
+                    console.log(`🔍 ${sym}: Found ${first5.length}/5 candles from 9:15-9:20`);
+                    if (first5.length === 5) {
+                        const hi = Math.max(...first5.map(c => c.h));
+                        const lo = Math.min(...first5.map(c => c.l));
+                        const op = first5[0].o;
+                        const v = ((hi - lo) / op) * 100;
+                        console.log(`🔍 ${sym}: Range ${lo}-${hi}, Vol: ${v.toFixed(2)}%`);
+                    }
+                }
+
                 if (first5.length === 5) {
                     const hi = Math.max(...first5.map(c => c.h));
                     const lo = Math.min(...first5.map(c => c.l));
                     const op = first5[0].o;
                     const v = ((hi - lo) / op) * 100;
+
                     if (v < CONFIG.VOLATILITY_THRESH) {
                         this.qualified.add(sym);
-                        this.firstCandle[sym] = { hi, lo };
+                        this.firstCandle[sym] = { hi, lo, volatility: v };
                         console.log(`✅ ${sym} qualified (vol=${v.toFixed(2)}%)`);
+                    } else {
+                        console.log(`❌ ${sym} disqualified (vol=${v.toFixed(2)}% > 1.0%)`);
                     }
                 }
             }
 
+            // Breakout detection logic remains the same
             if (this.qualified.has(sym) && hhmmss() < CONFIG.ENTRY_CUTOFF) {
                 const { hi, lo } = this.firstCandle[sym];
                 if (price > hi && this.pm.canEnter(sym, 'LONG')) {
@@ -212,6 +237,12 @@ class BreakoutBot {
         } catch (error) {
             console.error('❌ Error in onTick:', error.message);
         }
+    }
+
+
+    onOrderUpdate(orderUpdate) {
+        // Handle order updates if needed
+        console.log('📋 Order update received:', orderUpdate);
     }
 
     tokenToSymbol(tk) {
@@ -291,7 +322,6 @@ class BreakoutBot {
             // Detailed minute update (every minute with more info)
             if (now - lastMinuteUpdate >= 60000) { // Every minute
                 const currentHour = new Date().getHours();
-                const currentMinute = new Date().getMinutes();
 
                 if (currentHour >= 9 && currentHour < 16) { // During market hours
                     console.log(`\n⏰ === ${currentTime} Market Update ===`);
@@ -371,24 +401,44 @@ class BreakoutBot {
         }
     }
 
-
     async squareOff() {
         try {
             console.log('🔄 Squaring off positions...');
             const pos = await this.api.get_positions();
 
             if (pos.stat === 'Ok') {
-                for (const p of pos.values) {
+                for (const p of pos.values || []) {
                     if (Number(p.netqty) !== 0) {
                         await this.api.place_order(
                             Number(p.netqty) > 0 ? 'S' : 'B', 'M', p.exch, p.tsym, Math.abs(p.netqty),
                             0, 'MKT', 0, 0, 'DAY', 'NO', 'EOD'
                         );
+                        console.log(`✅ Squared off: ${p.tsym}`);
                     }
                 }
             }
         } catch (error) {
             console.error('❌ Square off error:', error.message);
+        }
+    }
+
+    async generateSummary() {
+        try {
+            console.log('\n📋 === DAILY TRADING SUMMARY ===');
+            console.log(`📅 Date: ${new Date().toLocaleDateString()}`);
+            console.log(`⏰ Session Time: ${getCurrentTime()}`);
+            console.log(`📊 Qualified Stocks: ${this.qualified.size}/50`);
+
+            if (this.qualified.size > 0) {
+                console.log('✅ Qualified Symbols:', Array.from(this.qualified).join(', '));
+            }
+
+            const positions = this.pm.summary();
+            const totalTrades = Object.values(positions).flat().length;
+            console.log(`💼 Total Trades Attempted: ${totalTrades}`);
+            console.log('================================\n');
+        } catch (error) {
+            console.error('❌ Error generating summary:', error.message);
         }
     }
 }
@@ -404,4 +454,3 @@ if (require.main === module) {
         }
     })();
 }
-

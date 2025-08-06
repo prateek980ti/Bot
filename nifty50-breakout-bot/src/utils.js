@@ -9,3 +9,8 @@ exports.timeIsAfter = target => {
   const tgt = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, s);
   return now >= tgt;
 };
+
+
+exports.getCurrentTime = () => {
+  return new Date().toLocaleTimeString('en-IN', { hour12: false });
+};
